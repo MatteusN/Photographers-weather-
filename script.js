@@ -37,122 +37,286 @@ const ICONS = {
   thunder: `<svg viewBox="0 0 24 24" fill="none" xmlns="http://w3.org" stroke="#fff"><path d="M13 2L4 14h6l-1 8 9-12h-6l1-8z" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
 };
 
-const DAY_NAMES = ["SUN","MON","TUE","WED","THU","FRI","SAT"];
+const DAY_NAMES = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
 
 async function initWeather() {
-  // 1) Sijainti
-  const { latitude, longitude } = await new Promise((res, rej) =>
-    navigator.geolocation.getCurrentPosition(
-      p => res({ latitude: p.coords.latitude, longitude: p.coords.longitude }),
-      rej,
-      { timeout: 10000 }
-    )
-  );
+  try {
+    const coords = await getUserLocation();
+    const now = new Date();
 
-  // 2) Kaupunkinimi
-  const city = await reverseGeocode(latitude, longitude);
+    const [city, forecast] = await Promise.all([
+      fetchCityName(coords.latitude, coords.longitude),
+      fetchFmiForecast(coords.latitude, coords.longitude, now)
+    ]);
 
-  // 3) FMI-ennuste (5 pv, tuntikohtainen)
-  const now = new Date();
-  const start = now.toISOString().replace(/\.\d{3}Z$/, "Z");
-  const end   = new Date(now.getTime() + 5 * 86400000).toISOString().replace(/\.\d{3}Z$/, "Z");
-
-  const fmiHost = ["opendata", "fmi", "fi"].join(".");
-  const fmiBase = "https://" + fmiHost + "/wfs";
-
-  const fmiParams = new URLSearchParams({
-    service: "WFS",
-    version: "2.0.0",
-    request: "getFeature",
-    storedquery_id: "fmi::forecast::edited::weather::scandinavia::point::multipointcoverage",
-    latlon: `${latitude.toFixed(4)},${longitude.toFixed(4)}`,
-    parameters: "Temperature,WeatherSymbol3",
-    starttime: start,
-    endtime: end
-  });
-
-  const resp = await fetch(`${fmiBase}?${fmiParams.toString()}`);
-  if (!resp.ok) throw new Error(`FMI API virhe: ${resp.status}`);
-  const doc  = new DOMParser().parseFromString(await resp.text(), "text/xml");
-
-  // 4) Parsi multipointcoverage-data
-  const posList = doc.getElementsByTagName("gmlcov:positions");
-  const valList = doc.getElementsByTagName("gml:doubleOrNilReasonTupleList");
-
-  const posText = posList.item(0) ? posList.item(0).textContent.trim() : "";
-  const valText = valList.item(0) ? valList.item(0).textContent.trim() : "";
-
-  const times = posText.split(/\n+/).map(line => {
-    const parts = line.trim().split(/\s+/);
-    const unixSec = Number(parts.at(2));
-    return new Date(unixSec * 1000).toISOString();
-  });
-
-  const temps = [];
-  const symbols = [];
-  valText.split(/\n+/).forEach(line => {
-    const [t, s] = line.trim().split(/\s+/).map(Number);
-    temps.push(t);
-    symbols.push(Math.round(s));
-  });
-
-  // 5) Täytä kortti
-  const card = document.querySelector(".card");
-  const nowIdx = Math.max(0, times.findIndex(t => new Date(t) >= now));
-
-  const curInfo = WEATHER_SYMBOLS[symbols.at(nowIdx)] || { label: "—", icon: "cloudy" };
-  card.querySelector(".icon-current").innerHTML = ICONS[curInfo.icon];
-  card.querySelector(".weather-label").textContent = curInfo.label;
-  card.querySelector(".temperature").textContent = `${Math.round(temps.at(nowIdx))}°`;
-
-  // Min/Max tänään
-  const todayStr = now.toISOString().slice(0, 10);
-  const tIdxs = times.map((t, i) => t.startsWith(todayStr) ? i : -1).filter(i => i >= 0);
-  const tTemps = tIdxs.length ? tIdxs.map(i => temps.at(i)) : [temps.at(nowIdx)];
-  card.querySelector(".range").textContent =
-    `${Math.round(Math.max(...tTemps))}°/${Math.round(Math.min(...tTemps))}°`;
-
-  // Aika / päivämäärä
-  card.querySelector(".hour").textContent =
-    now.toLocaleTimeString("fi-FI", { hour: "2-digit", minute: "2-digit" });
-  card.querySelector(".date").textContent =
-    `${DAY_NAMES.at(now.getDay())} ${String(now.getDate()).padStart(2,"0")}-${String(now.getMonth()+1).padStart(2,"0")}`;
-  card.querySelector(".city").textContent = city;
-
-  // 4 päivää
-  const btns = card.querySelectorAll(".days-section button");
-  for (let d = 1; d <= 4; d++) {
-    const dt   = new Date(now.getTime() + d * 86400000);
-    const dStr = dt.toISOString().slice(0, 10);
-    const idxs = times.map((t, i) => t.startsWith(dStr) ? i : -1).filter(i => i >= 0);
-    const mid  = idxs.length ? idxs.at(Math.floor(idxs.length / 2)) : -1;
-    const info = WEATHER_SYMBOLS[symbols.at(mid)] || { icon: "cloudy" };
-
-    if (btns.item(d - 1)) {
-      btns.item(d - 1).querySelector(".day").textContent = DAY_NAMES.at(dt.getDay());
-      btns.item(d - 1).querySelector(".icon-weather-day").innerHTML = ICONS[info.icon];
-    }
+    renderWeatherCard(forecast, city, now, coords);
+  } catch (err) {
+    console.error("Säätietojen lataus epäonnistui:", err);
+    const label = document.querySelector(".weather-label");
+    if (label) label.textContent = "Virhe ladattaessa";
   }
 }
 
-async function reverseGeocode(lat, lon) {
+function getUserLocation() {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) {
+      reject(new Error("Selain ei tue paikannusta"));
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      pos => resolve({
+        latitude: pos.coords.latitude,
+        longitude: pos.coords.longitude
+      }),
+      err => reject(err),
+      { timeout: 10000 }
+    );
+  });
+}
+
+async function fetchCityName(lat, lon) {
   try {
-    const geoHost = ["nominatim", "openstreetmap", "org"].join(".");
-    const geoBase = "https://" + geoHost + "/reverse";
-    const geoParams = new URLSearchParams({
-      lat: lat,
-      lon: lon,
-      format: "json",
-      zoom: "10"
-    });
-    const r = await fetch(`${geoBase}?${geoParams.toString()}`, {
+   const url = new URL("https://nominatim.openstreetmap.org/reverse");
+    url.searchParams.set("lat", lat);
+    url.searchParams.set("lon", lon);
+    url.searchParams.set("format", "json");
+    url.searchParams.set("zoom", "10");
+
+    const res = await fetch(url.toString(), {
       headers: { "Accept-Language": "fi" }
     });
-    const j = await r.json();
-    return j.address?.city || j.address?.town || j.address?.village || "Tuntematon";
+    const data = await res.json();
+    return data.address?.city || data.address?.town || data.address?.village || "Tuntematon";
   } catch {
     return "Tuntematon";
   }
 }
+async function fetchFmiForecast(lat, lon, now) {
+  const start = now.toISOString().replace(/\.\d{3}Z$/, "Z");
+  const end = new Date(now.getTime() + 5 * 86400000).toISOString().replace(/\.\d{3}Z$/, "Z");
 
-initWeather().catch(console.error);
+  const fmiUrl = new URL("https://" + ["opendata", "fmi", "fi"].join(".") + "/wfs");
+  fmiUrl.searchParams.set("service", "WFS");
+  fmiUrl.searchParams.set("version", "2.0.0");
+  fmiUrl.searchParams.set("request", "getFeature");
+  fmiUrl.searchParams.set("storedquery_id", "fmi::forecast::edited::weather::scandinavia::point::multipointcoverage");
+  fmiUrl.searchParams.set("latlon", `${lat.toFixed(4)},${lon.toFixed(4)}`);
+  fmiUrl.searchParams.set("parameters", "Temperature,WeatherSymbol3,Precipitation1h,PoP,TotalCloudCover");
+  fmiUrl.searchParams.set("starttime", start);
+  fmiUrl.searchParams.set("endtime", end);
+
+  const res = await fetch(fmiUrl.toString());
+  if (!res.ok) throw new Error(`FMI API virhe: ${res.status}`);
+
+  const xmlText = await res.text();
+  const doc = new DOMParser().parseFromString(xmlText, "text/xml");
+
+  const posNode = doc.getElementsByTagName("gmlcov:positions").item(0);
+  const valNode = doc.getElementsByTagName("gml:doubleOrNilReasonTupleList").item(0);
+
+  if (!posNode || !valNode) {
+    throw new Error("FMI XML-vastauksesta puuttuu data");
+  }
+
+  const posLines = posNode.textContent.trim().split(/\n+/);
+  const valLines = valNode.textContent.trim().split(/\n+/);
+
+  return posLines.map((line, index) => {
+    const posParts = line.trim().split(/\s+/);
+    const unixSec = Number(posParts.at(2));
+    const date = new Date(unixSec * 1000);
+
+    const valParts = (valLines.at(index) || "").trim().split(/\s+/).map(Number);
+
+    return {
+      date: date,
+      isoDate: date.toISOString().slice(0, 10),
+      temp: valParts.at(0) ?? 0,
+      symbol: Math.round(valParts.at(1) ?? 3),
+      precip: valParts.at(2) || 0,
+      pop: Math.round(valParts.at(3) || 0),
+      clouds: Math.round(valParts.at(4) ?? 100)
+    };
+  });
+}
+
+
+function renderWeatherCard(forecast, city, now, coords) {
+  const card = document.querySelector(".card");
+  if (!card || !forecast.length) return;
+
+  // 1. Nykyhetkeä lähin ennustetunti
+  const nowIdx = Math.max(0, forecast.findIndex(item => item.date >= now));
+  const current = forecast.at(nowIdx);
+  const curInfo = WEATHER_SYMBOLS[current.symbol] || { label: "—", icon: "cloudy" };
+
+  card.querySelector(".icon-current").innerHTML = ICONS[curInfo.icon];
+  card.querySelector(".weather-label").textContent = curInfo.label;
+  card.querySelector(".temperature").textContent = `${Math.round(current.temp)}°`;
+
+  // 2. Tämän päivän ylin ja alin lämpötila
+  const todayStr = now.toISOString().slice(0, 10);
+  const todayTemps = forecast
+    .filter(item => item.isoDate === todayStr)
+    .map(item => item.temp);
+
+  const maxTemp = todayTemps.length ? Math.max(...todayTemps) : current.temp;
+  const minTemp = todayTemps.length ? Math.min(...todayTemps) : current.temp;
+  card.querySelector(".range").textContent = `${Math.round(maxTemp)}°/${Math.round(minTemp)}°`;
+
+  // 3. Kellonaika, päivämäärä ja kaupunki
+  card.querySelector(".hour").textContent =
+    now.toLocaleTimeString("fi-FI", { hour: "2-digit", minute: "2-digit" });
+  card.querySelector(".date").textContent =
+    `${DAY_NAMES.at(now.getDay())} ${String(now.getDate()).padStart(2, "0")}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  card.querySelector(".city").textContent = city;
+
+  // 4. Seuraavat 4 päivää (alareunan painikkeet)
+  const btns = card.querySelectorAll(".days-section button");
+  for (let d = 1; d <= 4; d++) {
+    const targetDate = new Date(now.getTime() + d * 86400000);
+    const targetStr = targetDate.toISOString().slice(0, 10);
+    const dayItems = forecast.filter(item => item.isoDate === targetStr);
+
+    const midItem = dayItems.length ? dayItems.at(Math.floor(dayItems.length / 2)) : current;
+    const info = WEATHER_SYMBOLS[midItem.symbol] || { icon: "cloudy" };
+
+    const btn = btns.item(d - 1);
+    if (btn) {
+      btn.querySelector(".day").textContent = DAY_NAMES.at(targetDate.getDay());
+      btn.querySelector(".icon-weather-day").innerHTML = ICONS[info.icon];
+    }
+  }
+
+  // 5. Lisätiedot: Seuraava sade
+  const nextRainEl = card.querySelector(".next-rain");
+  if (nextRainEl) {
+    const nextRain = forecast.slice(nowIdx).find(item => item.precip > 0);
+    if (nextRain) {
+      const dayName = DAY_NAMES.at(nextRain.date.getDay());
+      const timeStr = nextRain.date.toLocaleTimeString("fi-FI", { hour: "2-digit", minute: "2-digit" });
+      nextRainEl.textContent = `${dayName} klo ${timeStr} (${nextRain.pop} %)`;
+    } else {
+      nextRainEl.textContent = "Ei sadetta 5 vrk sisällä";
+    }
+  }
+
+  // 6. Lisätiedot: Päivänvalo ja auringonlasku
+  const daylightEl = card.querySelector(".daylight-info");
+  if (daylightEl) {
+    daylightEl.textContent = calculateDaylight(now, coords.latitude, coords.longitude);
+  }
+
+    // 7. Lisätiedot: Auringonnousu ja Kuu (SunCalc-kirjasto)
+  const sunriseEl = card.querySelector(".sunrise-info");
+  const moonEl = card.querySelector(".moon-info");
+
+  if (window.SunCalc) {
+    const sunTimes = SunCalc.getTimes(now, coords.latitude, coords.longitude);
+    let nextSunrise = sunTimes.sunrise;
+    if (now > nextSunrise) {
+      const tomorrow = new Date(now.getTime() + 86400000);
+      nextSunrise = SunCalc.getTimes(tomorrow, coords.latitude, coords.longitude).sunrise;
+    }
+    if (sunriseEl) {
+      sunriseEl.textContent = `klo ${nextSunrise.toLocaleTimeString("fi-FI", { hour: "2-digit", minute: "2-digit" })}`;
+    }
+
+    const moonTimes = SunCalc.getMoonTimes(now, coords.latitude, coords.longitude);
+    const moonIllum = SunCalc.getMoonIllumination(now);
+    const moonPct = Math.round(moonIllum.fraction * 100);
+
+    let moonText = "";
+    if (moonTimes.alwaysUp) {
+      moonText = "ylhäällä koko päivän";
+    } else if (moonTimes.alwaysDown) {
+      moonText = "ei nouse tänään";
+    } else if (moonTimes.rise && now < moonTimes.rise) {
+      const riseStr = moonTimes.rise.toLocaleTimeString("fi-FI", { hour: "2-digit", minute: "2-digit" });
+      moonText = `nousee klo ${riseStr}`;
+    } else {
+      let nextSet = moonTimes.set;
+      if (!nextSet || now > nextSet) {
+        const tomorrow = new Date(now.getTime() + 86400000);
+        nextSet = SunCalc.getMoonTimes(tomorrow, coords.latitude, coords.longitude).set;
+      }
+      const setStr = nextSet
+        ? nextSet.toLocaleTimeString("fi-FI", { hour: "2-digit", minute: "2-digit" })
+        : "—";
+      moonText = `ylhäällä, laskee klo ${setStr}`;
+    }
+
+    if (moonEl) {
+      moonEl.textContent = `${moonText} (${moonPct} %)`;
+    }
+  } else {
+    if (sunriseEl) sunriseEl.textContent = "SunCalc puuttuu";
+    if (moonEl) moonEl.textContent = "SunCalc puuttuu";
+  }
+
+
+  // 8. Lisätiedot: Tähtitaivaan näkyvyys yöllä (klo 21–05 pilvisyyden keskiarvo)
+  const starEl = card.querySelector(".stargazing-info");
+  if (starEl) {
+    const nightHours = forecast.slice(nowIdx, nowIdx + 18).filter(item => {
+      const h = item.date.getHours();
+      return h >= 21 || h <= 5;
+    });
+
+    if (nightHours.length) {
+      const avgClouds = Math.round(
+        nightHours.reduce((sum, item) => sum + item.clouds, 0) / nightHours.length
+      );
+      let skyText = "Pilvistä, ei näy";
+      if (avgClouds <= 20) skyText = "Kirkas, loistava näkyvyys";
+      else if (avgClouds <= 50) skyText = "Melko selkeää, näkyy hyvin";
+      else if (avgClouds <= 75) skyText = "Puolipilvistä, näkyy ajoittain";
+
+      starEl.textContent = `${skyText} (pilvisyys ${avgClouds} %)`;
+    } else {
+      starEl.textContent = "Tieto ei saatavilla";
+    }
+  }
+}
+
+
+function calculateDaylight(date, lat, lon) {
+  const rad = Math.PI / 180;
+  const startOfYear = new Date(date.getFullYear(), 0, 0);
+  const dayOfYear = Math.floor((date - startOfYear) / 86400000);
+
+  const decl = 23.44 * Math.sin(rad * (360 / 365) * (dayOfYear - 81));
+  const cosH = (Math.cos(rad * 90.833) - Math.sin(rad * lat) * Math.sin(rad * decl)) /
+               (Math.cos(rad * lat) * Math.cos(rad * decl));
+
+  if (cosH > 1) return "Kaamos (ei nouse tänään)";
+  if (cosH < -1) return "Yötön yö (ei laske tänään)";
+
+  const H = Math.acos(cosH) / rad;
+  const eqTime = 9.87 * Math.sin(2 * rad * (360 / 365) * (dayOfYear - 81)) -
+                 7.53 * Math.cos(rad * (360 / 365) * (dayOfYear - 81)) -
+                 1.5 * Math.sin(rad * (360 / 365) * (dayOfYear - 81));
+
+  const solarNoonUTC = 12 - (lon / 15) - (eqTime / 60);
+  const sunriseUTC = solarNoonUTC - (H / 15);
+  const sunsetUTC  = solarNoonUTC + (H / 15);
+
+  const sunrise = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate(), 0, sunriseUTC * 60));
+  const sunset  = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate(), 0, sunsetUTC * 60));
+
+  const sunsetStr = sunset.toLocaleTimeString("fi-FI", { hour: "2-digit", minute: "2-digit" });
+
+  if (date < sunrise) {
+    const mins = Math.round((sunrise - date) / 60000);
+    return `Pimeää (nousee ${Math.floor(mins / 60)}h ${mins % 60}min päästä)`;
+  }
+
+  if (date < sunset) {
+    const mins = Math.round((sunset - date) / 60000);
+    return `${Math.floor(mins / 60)}h ${mins % 60}min jäljellä (laskee ${sunsetStr})`;
+  }
+
+  return `Aurinko laskenut (laski ${sunsetStr})`;
+}
+
+initWeather();
